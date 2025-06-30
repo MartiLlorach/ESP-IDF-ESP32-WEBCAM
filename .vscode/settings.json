@@ -20,6 +20,10 @@
   "files.associations": {
     "esp_camera.h": "c",
     "sockets.h": "c",
-    "errno.h": "c"
+    "errno.h": "c",
+    "ostream": "c",
+    "task.h": "c",
+    "semphr.h": "c",
+    "sensor.h": "c"
   }
 }

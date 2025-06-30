@@ -35,6 +35,8 @@
 
 #define TAG "ESP32-CAM"
 
+static QueueHandle_t frameBuffer_queue;
+
 static camera_config_t camera_config = {
     .pin_pwdn  = CAM_PIN_PWDN,
     .pin_reset = CAM_PIN_RESET,
@@ -54,26 +56,39 @@ static camera_config_t camera_config = {
     .pin_href = CAM_PIN_HREF,
     .pin_pclk = CAM_PIN_PCLK,
 
-    .xclk_freq_hz = 26000000,
+    .xclk_freq_hz = 38000000, //slightly unstable but works
     .ledc_timer = LEDC_TIMER_0,
     .ledc_channel = LEDC_CHANNEL_0,
 
     .pixel_format = PIXFORMAT_JPEG,
-    .frame_size = FRAMESIZE_XGA,
+    .frame_size = FRAMESIZE_SVGA,
     
-    .jpeg_quality = 16, //0-63, for OV series camera sensors, lower number means higher quality
-    .fb_count = 2,
+    .jpeg_quality = 15, //0-63, for OV series camera sensors, lower number means higher quality
+    .fb_count = 3,
     .fb_location = CAMERA_FB_IN_PSRAM,
     .grab_mode = CAMERA_GRAB_LATEST
 };
 
-void camera_init(){
-    gpio_set_level(CAM_PIN_PWDN, 0);
+void camera_init(void *arg){
+    ESP_LOGI(TAG, "camera_init running on core %d!", xPortGetCoreID());
 
+    gpio_set_level(CAM_PIN_PWDN, 0);
+    
     ESP_ERROR_CHECK(esp_camera_init(&camera_config));
+    while (1) {
+        // TickType_t start = xTaskGetTickCount();
+
+        camera_fb_t *frameBuffer = esp_camera_fb_get();
+        xQueueSend(frameBuffer_queue, &frameBuffer, portMAX_DELAY); 
+
+        // TickType_t end = xTaskGetTickCount();
+        // TickType_t delta = end - start;
+        // ESP_LOGI(TAG, "Camera loop duration: %lu ticks (~%lu ms)", delta, delta * portTICK_PERIOD_MS);
+    }
 }
 
-void udp_client_stream() {
+void udp_client_stream(void *args) {
+    ESP_LOGI(TAG, "udp_client_stream running on core %d!", xPortGetCoreID());
     camera_fb_t * frameBuffer = NULL;
 
     struct sockaddr_in dest_addr = {
@@ -82,26 +97,39 @@ void udp_client_stream() {
         .sin_port = htons(UDP_SERVER_PORT)
     };
 
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
     int udp_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
     if (udp_socket < 0) {
         ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
         esp_restart();
     }
-
-    camera_init();
+    
     while (1) {
-        frameBuffer = esp_camera_fb_get();
-        if (!frameBuffer) {
-            ESP_LOGE(TAG, "Camera capture failed");
-            esp_restart();
+        // TickType_t start = xTaskGetTickCount();
+        if (xQueueReceive(frameBuffer_queue, &frameBuffer, portMAX_DELAY) != pdTRUE){
+            continue;
         }
+
+        if (!frameBuffer || !frameBuffer->buf || frameBuffer->len == 0) {
+            ESP_LOGE(TAG, "Frame inválido. Saltando frame.");
+            esp_camera_fb_return(frameBuffer);
+            continue;
+        }
+
         int err = sendto(udp_socket, frameBuffer->buf, frameBuffer->len, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+
         if (err < 0) {
             ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
-            esp_restart();
+            esp_camera_fb_return(frameBuffer);
+            continue;
+            //esp_restart();
         }
+
         //ESP_LOGI(TAG, "Message sent");
         esp_camera_fb_return(frameBuffer);
+        // TickType_t end = xTaskGetTickCount();
+        // TickType_t delta = end - start;
+        // ESP_LOGI(TAG, "udp_client_stream loop duration: %lu ticks (~%lu ms)", delta, delta * portTICK_PERIOD_MS);
     }
 
 }
@@ -135,7 +163,8 @@ void ip_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, 
     {
         case IP_EVENT_STA_GOT_IP:
             ESP_LOGI(TAG, "Got IP!");
-            udp_client_stream();
+            xTaskCreatePinnedToCore(camera_init, "camera_task", 4096, NULL, 1, NULL, 1);
+            xTaskCreatePinnedToCore(udp_client_stream, "udp_task", 4096, NULL, 1, NULL, 0);
             break;
         case IP_EVENT_STA_LOST_IP:
             ESP_LOGE(TAG, "LOST IP, REBOOTING");
@@ -205,6 +234,8 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
+
+    frameBuffer_queue = xQueueCreate( 3, sizeof( camera_fb_t* ) );
 
     wifi_init_sta();
 }

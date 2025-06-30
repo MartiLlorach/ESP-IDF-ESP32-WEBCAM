@@ -20,7 +20,7 @@ fps_print   = 0
 t0          = time.time()
 
 
-WIDTH, HEIGHT, FPS = 1024, 768, 30
+WIDTH, HEIGHT, FPS = 800, 600, 50 #SVGA
 with pyvirtualcam.Camera(width=WIDTH,
                          height=HEIGHT,
                          fps=FPS,
